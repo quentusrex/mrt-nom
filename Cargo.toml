@@ -3,6 +3,11 @@ name = "mrt-nom"
 version = "0.1.0"
 authors = ["William King <quentusrex@gmail.com>"]
 edition = "2018"
+license-file = "LICENSE"
+description = "Parsing of MRT file format for BGP monitoring and information"
+homepage = "https://github.com/quentusrex/mrt-nom"
+documentation = "https://docs.rs/mrt-nom"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
