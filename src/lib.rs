@@ -59,11 +59,13 @@ pub struct MrtRIBIPv4Unicast {
 
 }
 
+
 #[derive(Debug)]
-pub struct BGPAttr {
-    pub flags: u8,
-    pub type_code: u8,
-    pub data: Vec<u8>
+pub struct MrtRIBIPv6Unicast {
+    pub sequence: u32,
+    pub prefix_len: u8,
+    pub prefix: Vec<u8>,
+    pub rib_entries: Vec<MrtRIBEntry>
 }
 
 #[derive(Debug)]
@@ -74,12 +76,10 @@ pub struct MrtRIBEntry {
 }
 
 #[derive(Debug)]
-pub struct MrtRIBIPv6Unicast {
-    pub sequence: u32,
-    pub prefix_len: u8,
-    pub prefix: Vec<u8>,
-    pub rib_entries: Vec<MrtRIBEntry>
-
+pub struct BGPAttr {
+    pub flags: u8,
+    pub type_code: u8,
+    pub data: Vec<u8>
 }
 
 #[derive(Debug)]
@@ -142,7 +142,7 @@ fn parse_bgp_attributes(i: &[u8]) -> IResult<&[u8], Vec<BGPAttr>> {
 }
 
 fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
-    dbg!(i);
+    //dbg!(i);
     // unimplemented!("RIB Entry");
     do_parse!(i,
               flags: be_u8 >>
@@ -164,7 +164,7 @@ fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
 }
 
 fn parse_rib_entry(i: &[u8]) -> IResult<&[u8], MrtRIBEntry> {
-    dbg!(i);
+    // dbg!(i);
     do_parse!(i,
               peer_index: be_u16 >>
               orig_time: be_u32 >>
@@ -226,14 +226,13 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                           view_name: String::from_utf8(name.clone().to_vec()).unwrap(),
                           peers: peers
                       }))
-            )
-                      
+            )                      
         },        
         (13, 2) => { // RIB_IPV4_UNICAST
             do_parse!(input,
                       seq: be_u32 >>
                       prefix_len: be_u8 >>
-                      prefix: take!(prefix_len) >>
+                      prefix: take!( (prefix_len + 7) / 8 ) >>
                       entries: length_count!(be_u16, parse_rib_entry) >>
                       (MrtMessage::RIBIPv4Unicast(MrtRIBIPv4Unicast{
                           sequence: seq,
@@ -241,16 +240,15 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                           prefix: prefix.to_vec(),
                           rib_entries: entries 
                       }))
-            )
-                      
+            )                      
         },
         (13, 4) => { // RIB_IPV6_UNICAST
-            dbg!(input);
-            unimplemented!("RIB IPv6");
+            // dbg!(input);
+            // unimplemented!("RIB IPv6");
             do_parse!(input,
                       seq: be_u32 >>
                       prefix_len: be_u8 >>
-                      prefix: take!(prefix_len) >>
+                      prefix: take!( (prefix_len + 7) / 8 ) >>
                       entries: length_count!(be_u16, parse_rib_entry) >>
                       (MrtMessage::RIBIPv6Unicast(MrtRIBIPv6Unicast{
                           sequence: seq,
@@ -258,8 +256,7 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                           prefix: prefix.to_vec(),
                           rib_entries: entries
                       }))
-            )
-                      
+            )                      
         }
         
         _ => {
@@ -270,7 +267,6 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
 }
 
 fn parse_record(input: &[u8]) -> IResult<&[u8], MrtRecord> {
-
     do_parse!(input, 
               timestamp: be_u32 >>
               major_type: be_u16 >>
