@@ -26,7 +26,12 @@ pub struct MrtRecord {
 #[derive(Debug)]
 pub enum MrtMessage {
     // table_dump_v2
-    PeerIndexTable(MrtPeerIndexTable)
+    PeerIndexTable(MrtPeerIndexTable),
+    RIBIPv4Unicast(MrtRIBIPv4Unicast),
+    // 3 RIB_IPV6_UNICAST
+    RIBIPv6Unicast(MrtRIBIPv6Unicast),
+    // 5 RIB_IPV6_MULTICAST
+    // 6 RIB_GENERIC
 }
 
 #[derive(Debug)]
@@ -46,6 +51,38 @@ pub struct MrtIndexTablePeer {
 }
 
 #[derive(Debug)]
+pub struct MrtRIBIPv4Unicast {
+    pub sequence: u32,
+    pub prefix_len: u8,
+    pub prefix: Vec<u8>,
+    pub rib_entries: Vec<MrtRIBEntry>
+
+}
+
+#[derive(Debug)]
+pub struct BGPAttr {
+    pub flags: u8,
+    pub type_code: u8,
+    pub data: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct MrtRIBEntry {
+    pub peer_index: u16,
+    pub orig_time: u32,
+    pub bgp_attributes: Vec<BGPAttr>
+}
+
+#[derive(Debug)]
+pub struct MrtRIBIPv6Unicast {
+    pub sequence: u32,
+    pub prefix_len: u8,
+    pub prefix: Vec<u8>,
+    pub rib_entries: Vec<MrtRIBEntry>
+
+}
+
+#[derive(Debug)]
 pub enum MrtType {
     UNKNOWN,
     OSPFv2,
@@ -58,7 +95,10 @@ pub enum MrtSubType {
     UNKNOWN,
     PeerIndexTable,
     RIBIPv4Unicast,
-    RIBIPv4Multicast
+    RIBIPv4Multicast,
+    RIBIPv6Unicast,
+    RIBIPv6Multicast,
+    RIBGeneric
 }
 
 impl From<u16> for MrtType {
@@ -83,6 +123,9 @@ impl From<(u16, u16)> for MrtSubType {
             (13, 1) => MrtSubType::PeerIndexTable,
             (13, 2) => MrtSubType::RIBIPv4Unicast,
             (13, 3) => MrtSubType::RIBIPv4Multicast,
+            (13, 4) => MrtSubType::RIBIPv6Unicast,
+            (13, 5) => MrtSubType::RIBIPv6Multicast,
+            (13, 6) => MrtSubType::RIBGeneric,
             
             _ => {
                 println!("Unknown MrtSubType: {:?}", i);
@@ -94,8 +137,49 @@ impl From<(u16, u16)> for MrtSubType {
 
 // named!(peer_type<(&[u8], usize), (u8, u8, u8)>, tuple!(take_bits!(6), take_bits!(1), take_bits!(1)) );
 
-fn parse_index_table_peer(i: &[u8]) -> IResult<&[u8], MrtIndexTablePeer> {
+fn parse_bgp_attributes(i: &[u8]) -> IResult<&[u8], Vec<BGPAttr>> {
+    many1!(i, parse_bgp_attribute)
+}
+
+fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
     dbg!(i);
+    // unimplemented!("RIB Entry");
+    do_parse!(i,
+              flags: be_u8 >>
+              code: be_u8 >>
+              len_raw: switch!( value!( (flags & 0b0001_0000) >= 1), // Extended length attribute
+                                true => take!(2) |
+                                false => take!(1) ) >>
+              len: value!( match (flags & 0b0001_0000) >= 1 {
+                  true => { u16::from_be_bytes(len_raw.try_into().expect("failed to get correct len for bgp attr"))},
+                  false => { u8::from_be_bytes(len_raw.try_into().expect("failed to get correct len for bgp attr")) as u16}
+              }) >> 
+              attr: take!(len) >>
+              (BGPAttr{
+                  flags: flags,
+                  type_code: code,
+                  data: attr.to_vec()
+              })
+    )
+}
+
+fn parse_rib_entry(i: &[u8]) -> IResult<&[u8], MrtRIBEntry> {
+    dbg!(i);
+    do_parse!(i,
+              peer_index: be_u16 >>
+              orig_time: be_u32 >>
+              attr_len: be_u16 >>
+              data: take!(attr_len) >>
+              // attrs: length_count!(be_u16, parse_bgp_attribute) >>
+              (MrtRIBEntry{
+                  peer_index: peer_index,
+                  orig_time: orig_time,
+                  bgp_attributes: parse_bgp_attributes(data).unwrap().1
+              })
+    )
+}
+
+fn parse_index_table_peer(i: &[u8]) -> IResult<&[u8], MrtIndexTablePeer> {
     do_parse!(i,
               peer_type: take!(1) >> 
 //              pad1: be_u8 >>
@@ -132,7 +216,6 @@ fn parse_index_table_peer(i: &[u8]) -> IResult<&[u8], MrtIndexTablePeer> {
 fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMessage> {
     match (major, subtype) {
         (13, 1) => {
-            dbg!(input);
             do_parse!(input,
                       id: be_u32 >>
                       name_len: be_u16 >>
@@ -145,8 +228,42 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                       }))
             )
                       
+        },        
+        (13, 2) => { // RIB_IPV4_UNICAST
+            do_parse!(input,
+                      seq: be_u32 >>
+                      prefix_len: be_u8 >>
+                      prefix: take!(prefix_len) >>
+                      entries: length_count!(be_u16, parse_rib_entry) >>
+                      (MrtMessage::RIBIPv4Unicast(MrtRIBIPv4Unicast{
+                          sequence: seq,
+                          prefix_len: prefix_len,
+                          prefix: prefix.to_vec(),
+                          rib_entries: entries 
+                      }))
+            )
+                      
+        },
+        (13, 4) => { // RIB_IPV6_UNICAST
+            dbg!(input);
+            unimplemented!("RIB IPv6");
+            do_parse!(input,
+                      seq: be_u32 >>
+                      prefix_len: be_u8 >>
+                      prefix: take!(prefix_len) >>
+                      entries: length_count!(be_u16, parse_rib_entry) >>
+                      (MrtMessage::RIBIPv6Unicast(MrtRIBIPv6Unicast{
+                          sequence: seq,
+                          prefix_len: prefix_len,
+                          prefix: prefix.to_vec(),
+                          rib_entries: entries
+                      }))
+            )
+                      
         }
+        
         _ => {
+            dbg!(input);
             unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
         }
     }
@@ -169,6 +286,9 @@ fn parse_record(input: &[u8]) -> IResult<&[u8], MrtRecord> {
     ) //.map(|_, res| res)
 }
 
+fn parse_records(input: &[u8]) -> IResult<&[u8], Vec<MrtRecord>> {
+    many1!(input, parse_record)
+}
 
 pub fn read_gz_file(path: &str) -> Result<MrtFile, std::io::Error> {
     let mut compressed = File::open(path).expect("Failed to open file");
@@ -183,9 +303,9 @@ pub fn read_gz_file(path: &str) -> Result<MrtFile, std::io::Error> {
 
     gz.read_to_end(&mut decompressed_buff).expect("Failed to fully decompress input file");
     
-    let (_, record) = parse_record(decompressed_buff.as_slice()).expect("Failed to parse decompressed file contents");
+    let (_, record) = parse_records(decompressed_buff.as_slice()).expect("Failed to parse decompressed file contents");
     println!("Record: {:?}", record);
-    let results = MrtFile{ records: vec![record] };
+    let results = MrtFile{ records: record };
     
     Ok(results)
 }
