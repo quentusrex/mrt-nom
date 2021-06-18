@@ -14,3 +14,4 @@ readme = "README.md"
 [dependencies]
 flate2 = { version = "0.2", features = ["tokio"] }
 nom = "6.1.2"
+ipnet = "2.3.1"

@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate nom;
+extern crate ipnet;
 
+use ipnet::{Ipv4Net, Ipv6Net};
 use std::fs::File;
 use std::io::Read;
 use flate2::bufread::GzDecoder;
@@ -8,6 +10,7 @@ use nom::{IResult, take_bits};
 use nom::number::complete::{be_u8, be_u16, be_u32};
 use nom::bytes::complete::take;
 use std::convert::TryInto;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Debug)]
 pub struct MrtFile {
@@ -19,7 +22,7 @@ pub struct MrtRecord {
     pub timestamp: u32,
     pub mrt_type: MrtType,
     pub subtype: MrtSubType,
-    pub length: u32,
+//    pub length: u32,
     pub message: MrtMessage
 }
 
@@ -43,28 +46,26 @@ pub struct MrtPeerIndexTable {
 
 #[derive(Debug)]
 pub struct MrtIndexTablePeer {
-    pub ipv6: bool,
+//    pub ipv6: bool,
     pub bgp_id: u32,
-    pub ip: String,
+    pub ip: IpAddr,
     pub asn: u32
-
 }
 
 #[derive(Debug)]
 pub struct MrtRIBIPv4Unicast {
     pub sequence: u32,
-    pub prefix_len: u8,
-    pub prefix: Vec<u8>,
+//    pub prefix_len: u8,
+    pub prefix: Ipv4Net,
     pub rib_entries: Vec<MrtRIBEntry>
-
 }
 
 
 #[derive(Debug)]
 pub struct MrtRIBIPv6Unicast {
     pub sequence: u32,
-    pub prefix_len: u8,
-    pub prefix: Vec<u8>,
+//    pub prefix_len: u8,
+    pub prefix: Ipv6Net,
     pub rib_entries: Vec<MrtRIBEntry>
 }
 
@@ -75,11 +76,34 @@ pub struct MrtRIBEntry {
     pub bgp_attributes: Vec<BGPAttr>
 }
 
+// TODO: convert the type code for BGPAttr into an enum, and handle the type code data properly.
+// https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-2
 #[derive(Debug)]
-pub struct BGPAttr {
-    pub flags: u8,
-    pub type_code: u8,
-    pub data: Vec<u8>
+pub enum BGPAttr {
+    ORIGIN,
+    AsPath(BGPAttrAsPath),
+    NEXT_HOP,
+//    MULTI_EXIT_DISC,
+    LOCAL_PREF,
+    AtomicAggregator, // 6
+    Aggregator, // 7
+    Community, // 8
+    MultiprotocolReachableNLRI, // 14
+    MultiprotocolUnreachableNLRI, // 15
+    ExtendedCommunities, // 16
+    ConnectorAttribute, // 20 deprecated
+    AsPathLimit, // 21 deprecated
+    LargeCommunity, // 32
+    ReservedDevelopment // 255
+}
+
+#[derive(Debug)]
+pub struct BGPAttrAsPath {
+//    pub optional: bool,   // bit 0
+//    pub transitive: bool, // bit 1
+//    pub partial: bool,    // bit 2
+//    pub extended_length: bool, // bit 3
+    pub as_path: Vec<u32>
 }
 
 #[derive(Debug)]
@@ -99,6 +123,37 @@ pub enum MrtSubType {
     RIBIPv6Unicast,
     RIBIPv6Multicast,
     RIBGeneric
+}
+
+impl From<(u8, bool, bool, bool, &[u8])> for BGPAttr {
+    fn from(input: (u8, bool, bool, bool, &[u8])) -> Self {
+        let (i, _o, _t, _p, d) = input;
+        match i {
+            1 => BGPAttr::ORIGIN,
+            2 => {
+                let (_, resp) = parse_extended_as_path(d).unwrap();
+                let (segment_type, segment_len, asns) = resp;
+                BGPAttr::AsPath(BGPAttrAsPath{
+                    as_path: asns
+                })
+            },
+            3 => BGPAttr::NEXT_HOP,
+            4 => BGPAttr::LOCAL_PREF,
+            6 => BGPAttr::AtomicAggregator,
+            7 => BGPAttr::Aggregator,
+            8 => BGPAttr::Community,
+            14 => BGPAttr::MultiprotocolReachableNLRI,
+            15 => BGPAttr::MultiprotocolUnreachableNLRI,
+            16 => BGPAttr::ExtendedCommunities,
+            20 => BGPAttr::ConnectorAttribute,
+            21 => BGPAttr::AsPathLimit,
+            32 => BGPAttr::LargeCommunity,
+            255 => BGPAttr::ReservedDevelopment,
+            _ => {
+                unimplemented!("Unknown BGPAttrType: {}", i);                
+            }
+        }
+    }
 }
 
 impl From<u16> for MrtType {
@@ -147,20 +202,34 @@ fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
     do_parse!(i,
               flags: be_u8 >>
               code: be_u8 >>
-              len_raw: switch!( value!( (flags & 0b0001_0000) >= 1), // Extended length attribute
+              optional:   value!((flags & 0b1000_0000) >= 1) >>
+              transitive: value!((flags & 0b0100_0000) >= 1) >>
+              partial:    value!((flags & 0b0010_0000) >= 1) >>
+              extended_length: value!((flags & 0b0001_0000) >= 1) >>
+              len_raw: switch!( value!( extended_length ), // Extended length attribute
                                 true => take!(2) |
                                 false => take!(1) ) >>
-              len: value!( match (flags & 0b0001_0000) >= 1 {
+              len: value!( match extended_length {
                   true => { u16::from_be_bytes(len_raw.try_into().expect("failed to get correct len for bgp attr"))},
                   false => { u8::from_be_bytes(len_raw.try_into().expect("failed to get correct len for bgp attr")) as u16}
               }) >> 
               attr: take!(len) >>
-              (BGPAttr{
-                  flags: flags,
-                  type_code: code,
-                  data: attr.to_vec()
+              ({
+                  let attr_type: BGPAttr = (code, optional, transitive, partial, attr).into();
+                  attr_type
               })
     )
+}
+
+fn parse_extended_as_path(input: &[u8]) -> IResult<&[u8], (u8, u8, Vec<u32>)> {
+    dbg!(input);
+    do_parse!(input,
+              segment_type: be_u8 >>
+              segment_length: be_u8 >>
+              asns: length_count!(value!(segment_length), be_u32) >>
+              (
+                  (segment_type, segment_length, asns)
+              ))
 }
 
 fn parse_rib_entry(i: &[u8]) -> IResult<&[u8], MrtRIBEntry> {
@@ -196,8 +265,8 @@ fn parse_index_table_peer(i: &[u8]) -> IResult<&[u8], MrtIndexTablePeer> {
               addr_raw: take!(addr_len) >> 
               asn_raw: take!(asn_len) >>
               addr: value!(match ((peer_type[0] as u8) & 0b0000_0001) >= 1 {
-                  true => {format!("{:?}", addr_raw)},
-                  false => {format!("{:?}", addr_raw)}
+                  true => { IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr_raw.try_into().expect("incorrect ipv6 length") ))) },
+                  false => { IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr_raw.try_into().expect("incorrect ipv4 length") ))) }
               }) >>
               asn: value!(match ((peer_type[0] as u8) & 0b0000_0010) >= 1 {
                   true => { u32::from_be_bytes(asn_raw.try_into().expect("Failed to get correct length for asn")) },
@@ -205,7 +274,7 @@ fn parse_index_table_peer(i: &[u8]) -> IResult<&[u8], MrtIndexTablePeer> {
               }) >>
               
               (MrtIndexTablePeer{
-                  ipv6: ((peer_type[0] as u8) & 0b0000_0001) >= 1,
+                  // ipv6: ((peer_type[0] as u8) & 0b0000_0001) >= 1,
                   bgp_id: bgp_id,
                   ip: addr,
                   asn: asn  // {if asn_large == 0 { asn2.unwrap().into() } else { asn4.unwrap() }}
@@ -232,12 +301,17 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
             do_parse!(input,
                       seq: be_u32 >>
                       prefix_len: be_u8 >>
-                      prefix: take!( (prefix_len + 7) / 8 ) >>
+                      prefix_raw: take!( (prefix_len + 7) / 8 ) >>
+                      prefix: value!({
+                          let mut addr = vec![0u8; 4];
+                          addr[.. ((prefix_len + 7) / 8) as usize].copy_from_slice(&prefix_raw);
+                          Ipv4Net::new(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))), prefix_len).unwrap()
+                      }) >>
                       entries: length_count!(be_u16, parse_rib_entry) >>
                       (MrtMessage::RIBIPv4Unicast(MrtRIBIPv4Unicast{
                           sequence: seq,
-                          prefix_len: prefix_len,
-                          prefix: prefix.to_vec(),
+                          //prefix_len: prefix_len,
+                          prefix: prefix,
                           rib_entries: entries 
                       }))
             )                      
@@ -248,12 +322,17 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
             do_parse!(input,
                       seq: be_u32 >>
                       prefix_len: be_u8 >>
-                      prefix: take!( (prefix_len + 7) / 8 ) >>
+                      prefix_raw: take!( (prefix_len + 7) / 8 ) >>
+                      prefix: value!({
+                          let mut addr = vec![0u8; 16];
+                          addr[.. ((prefix_len + 7) / 8) as usize].copy_from_slice(&prefix_raw);
+                          Ipv6Net::new(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )), prefix_len).unwrap()
+                      }) >>
                       entries: length_count!(be_u16, parse_rib_entry) >>
                       (MrtMessage::RIBIPv6Unicast(MrtRIBIPv6Unicast{
                           sequence: seq,
-                          prefix_len: prefix_len,
-                          prefix: prefix.to_vec(),
+                          //prefix_len: prefix_len,
+                          prefix: prefix,
                           rib_entries: entries
                       }))
             )                      
@@ -276,7 +355,7 @@ fn parse_record(input: &[u8]) -> IResult<&[u8], MrtRecord> {
               (MrtRecord{ timestamp: timestamp,
                           mrt_type: major_type.into(),
                           subtype: (major_type, sub_type).into(),
-                          length: length,
+                          //length: length,
                           message: parse_message(major_type, sub_type, message).unwrap().1
               })
     ) //.map(|_, res| res)
