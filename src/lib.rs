@@ -2,7 +2,7 @@
 extern crate nom;
 extern crate ipnet;
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::fs::File;
 use std::io::Read;
 use flate2::bufread::GzDecoder;
@@ -80,21 +80,48 @@ pub struct MrtRIBEntry {
 // https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-2
 #[derive(Debug)]
 pub enum BGPAttr {
-    ORIGIN,
+    Origin(BGPAttrOrigin),
     AsPath(BGPAttrAsPath),
-    NEXT_HOP,
+    NextHop(IpAddr),
 //    MULTI_EXIT_DISC,
-    LOCAL_PREF,
+    LocalPref(u32),
     AtomicAggregator, // 6
-    Aggregator, // 7
-    Community, // 8
-    MultiprotocolReachableNLRI, // 14
+    Aggregator(BGPAttrAggregator), // 7
+    Community(BGPAttrCommunity), // 8
+    MultiprotocolReachableNLRI(BGPAttrMPReachableNLRI), // 14
     MultiprotocolUnreachableNLRI, // 15
     ExtendedCommunities, // 16
     ConnectorAttribute, // 20 deprecated
     AsPathLimit, // 21 deprecated
-    LargeCommunity, // 32
+    LargeCommunity(BGPAttrLargeCommunity), // 32
     ReservedDevelopment // 255
+}
+
+#[derive(Debug)]
+pub struct BGPAttrLargeCommunity {
+    pub global_admin: u32,
+    pub part_one: u32,
+    pub part_two: u32
+}
+
+#[derive(Debug)]
+pub struct BGPAttrExtendedCommunity {
+    pub high: u8,
+    pub low: u8,
+    pub value: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct BGPAttrCommunity {
+    pub asn: u16,
+    pub value: u16
+}
+
+
+#[derive(Debug)]
+pub struct BGPAttrAggregator {
+    pub asn: u16,
+    pub ip: Ipv4Addr
 }
 
 #[derive(Debug)]
@@ -125,11 +152,71 @@ pub enum MrtSubType {
     RIBGeneric
 }
 
+#[derive(Debug)]
+pub enum BGPAttrOrigin {
+    IGP,
+    EGP,
+    INCOMPLETE
+}
+
+#[derive(Debug)]
+pub struct BGPAttrMPReachableNLRI {
+    pub afi: u16,
+    pub safi: u8,
+    pub next_hop: IpAddr,
+    pub prefix: IpNet
+}
+
+impl From<&[u8]> for BGPAttrMPReachableNLRI {
+    fn from(input: &[u8]) -> Self {
+        parse_mp_reachable_nlri(input).unwrap().1
+    }
+}
+
+impl From<u8> for BGPAttrOrigin {
+    fn from(input: u8) -> Self {
+        match input {
+            0 => BGPAttrOrigin::IGP,
+            1 => BGPAttrOrigin::EGP,
+            2 => BGPAttrOrigin::INCOMPLETE,
+            _ => {
+                unimplemented!("Unknown BGP origin type: {}", input);
+            }
+        }
+    }
+}
+
+
+
+impl From<&[u8]> for BGPAttrLargeCommunity {
+    fn from(input: &[u8]) -> Self {
+        parse_large_communities(input).unwrap().1
+    }
+}
+
+impl From<&[u8]> for BGPAttrExtendedCommunity {
+    fn from(input: &[u8]) -> Self {
+        parse_extended_communities(input).unwrap().1
+    }
+}
+
+impl From<&[u8]> for BGPAttrCommunity {
+    fn from(input: &[u8]) -> Self {
+        parse_bgp_communities(input).unwrap().1
+    }
+}
+
+impl From<&[u8]> for BGPAttrAggregator {
+    fn from(input: &[u8]) -> Self {
+        parse_bgp_aggregator(input).unwrap().1
+    }
+}
+
 impl From<(u8, bool, bool, bool, &[u8])> for BGPAttr {
     fn from(input: (u8, bool, bool, bool, &[u8])) -> Self {
-        let (i, _o, _t, _p, d) = input;
+        let (i, o, t, p, d) = input;
         match i {
-            1 => BGPAttr::ORIGIN,
+            1 => BGPAttr::Origin(d[0].into()),            
             2 => {
                 let (_, resp) = parse_extended_as_path(d).unwrap();
                 let (segment_type, segment_len, asns) = resp;
@@ -137,20 +224,34 @@ impl From<(u8, bool, bool, bool, &[u8])> for BGPAttr {
                     as_path: asns
                 })
             },
-            3 => BGPAttr::NEXT_HOP,
-            4 => BGPAttr::LOCAL_PREF,
+            3 => {
+                let raw = d.to_vec();
+                if raw.len() > 4 {
+                    unimplemented!("Next Hop not implemented for ipv6: {:?}", raw);
+                }
+                let ip_addr = IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(raw.try_into().expect("incorrect ipv4 length") )));
+
+                BGPAttr::NextHop(ip_addr)
+            },
+            4 => {
+                let pref = u32::from_be_bytes(d.try_into().expect("incorrect ipv4 length"));
+                BGPAttr::LocalPref(pref)
+            },
+            // Deprecated attribute, but does carry a payload, that is going to be ignored until added here.
             6 => BGPAttr::AtomicAggregator,
-            7 => BGPAttr::Aggregator,
-            8 => BGPAttr::Community,
-            14 => BGPAttr::MultiprotocolReachableNLRI,
+            7 => BGPAttr::Aggregator(d.into()),
+            8 => BGPAttr::Community(d.into()),
+            14 => BGPAttr::MultiprotocolReachableNLRI(d.into()),
+            16 => BGPAttr::ExtendedCommunities(d.into()),
+            32 => BGPAttr::LargeCommunity(d.into()),
+            /* 
             15 => BGPAttr::MultiprotocolUnreachableNLRI,
-            16 => BGPAttr::ExtendedCommunities,
             20 => BGPAttr::ConnectorAttribute,
             21 => BGPAttr::AsPathLimit,
-            32 => BGPAttr::LargeCommunity,
             255 => BGPAttr::ReservedDevelopment,
+             */
             _ => {
-                unimplemented!("Unknown BGPAttrType: {}", i);                
+                unimplemented!("Unknown BGPAttrType: {} optional: {} transitive: {} partial: {} data: {:?}", i, o, t, p, d);
             }
         }
     }
@@ -192,13 +293,47 @@ impl From<(u16, u16)> for MrtSubType {
 
 // named!(peer_type<(&[u8], usize), (u8, u8, u8)>, tuple!(take_bits!(6), take_bits!(1), take_bits!(1)) );
 
+fn parse_large_communities(i: &[u8]) -> IResult<&[u8], BGPAttrLargeCommunity> {
+    do_parse!(i,
+              admin: be_u32 >>
+              one: be_u32 >>
+              two: be_u32 >>
+              ( BGPAttrLargeCommunity{
+                  global_admin: admin,
+                  part_one: one,
+                  part_two: two
+              })
+        )
+}
+
+fn parse_bgp_aggregator(i: &[u8]) -> IResult<&[u8], BGPAttrAggregator> {
+    do_parse!(i,
+              asn: be_u16 >>
+              ip: be_u32 >>
+              ( BGPAttrAggregator{
+                  asn: asn,
+                  ip: Ipv4Addr::from(ip)
+              })
+        )
+}
+
+fn parse_bgp_communities(i: &[u8]) -> IResult<&[u8], BGPAttrCommunity> {
+    do_parse!(i,
+              asn: be_u16 >>
+              value: be_u16 >>
+              ( BGPAttrCommunity{
+                  asn: asn,
+                  value: value
+              })
+        )
+}
+
 fn parse_bgp_attributes(i: &[u8]) -> IResult<&[u8], Vec<BGPAttr>> {
     many1!(i, parse_bgp_attribute)
 }
 
 fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
     //dbg!(i);
-    // unimplemented!("RIB Entry");
     do_parse!(i,
               flags: be_u8 >>
               code: be_u8 >>
@@ -221,8 +356,58 @@ fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
     )
 }
 
-fn parse_extended_as_path(input: &[u8]) -> IResult<&[u8], (u8, u8, Vec<u32>)> {
+fn parse_mp_reachable_nlri(input: &[u8]) -> IResult<&[u8], BGPAttrMPReachableNLRI> {
     dbg!(input);
+    do_parse!(input,
+              address_family_id: be_u16 >>
+              subsequent_address_family_id: be_u8 >>
+              next_hop_len: be_u8 >>
+              next_hop_raw: take!(next_hop_len) >>
+              next_hop: value!({
+                  match address_family_id {
+                      1 => {
+                          let mut addr = vec![0u8; 4];
+                          addr.copy_from_slice(&next_hop_raw);
+                          IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))))
+                      },
+                      2 => {
+                          let mut addr = vec![0u8; 16];
+                          addr.copy_from_slice(&next_hop_raw);
+                          IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )))
+                      },
+                      _ => { unimplemented!("Unknown MP Reachable NLRI with AFI {} SAFI {} and prefix_raw: {:?}",
+                                            address_family_id, subsequent_address_family_id, next_hop_raw )}
+                  }
+              }) >>
+              _reserved: take!(1) >>
+              nlri_len: be_u8 >>
+              prefix_raw: take!((nlri_len + 7) / 8) >>
+              prefix: value!({
+                  match address_family_id {
+                      1 => {
+                          let addr = Ipv4Addr::from(u32::from_be_bytes(prefix_raw.try_into().expect("incorrect ipv4 length") ));
+                          IpNet::V4(Ipv4Net::new(addr, nlri_len).expect("Invalid ipv4 network or prefix")) },
+                      2 => {
+                          let mut addr = vec![0u8; 16];
+                          addr[..((nlri_len + 7) / 8) as usize].copy_from_slice(&prefix_raw);                          
+                          let ip = Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") ));
+                          IpNet::V6(Ipv6Net::new(ip, nlri_len).expect("Invalid ipv6 network or prefix")) },
+                      _ => { unimplemented!("Unknown MP Reachable NLRI with AFI {} SAFI {} and prefix_raw: {:?}",
+                                            address_family_id, subsequent_address_family_id, prefix_raw )}
+                  }
+              }) >>
+              (
+                  BGPAttrMPReachableNLRI {
+                      afi: address_family_id,
+                      safi: subsequent_address_family_id,
+                      next_hop: next_hop,
+                      prefix: prefix
+                  }
+              ))
+}
+
+fn parse_extended_as_path(input: &[u8]) -> IResult<&[u8], (u8, u8, Vec<u32>)> {
+    // dbg!(input);
     do_parse!(input,
               segment_type: be_u8 >>
               segment_length: be_u8 >>
@@ -318,7 +503,6 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
         },
         (13, 4) => { // RIB_IPV6_UNICAST
             // dbg!(input);
-            // unimplemented!("RIB IPv6");
             do_parse!(input,
                       seq: be_u32 >>
                       prefix_len: be_u8 >>
@@ -337,7 +521,10 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                       }))
             )                      
         }
-        
+        (16, 4) => { // BGP4MP , BGP4MP_MESSAGE_AS4
+            dbg!(input);
+            unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        }
         _ => {
             dbg!(input);
             unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
