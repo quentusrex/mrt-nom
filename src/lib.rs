@@ -36,6 +36,32 @@ pub enum MrtMessage {
     RIBIPv6Unicast(MrtRIBIPv6Unicast),
     // 5 RIB_IPV6_MULTICAST
     // 6 RIB_GENERIC
+    // BGP4MP 
+    Bgp4mpMessageAs4(MrtBgp4mpMessageAs4), // 4
+    Bgp4mpStateChangeAs4(MrtBgp4mpStateChangeAs4), // 5
+}
+
+#[derive(Debug)]
+pub struct MrtBgp4mpMessageAs4 {
+    pub peer_as: u32,
+    pub local_as: u32,
+    pub interface_idx: u16,
+    pub addr_family: u16,
+    pub peer_ip: IpAddr,
+    pub local_ip: IpAddr,
+    pub bgp_message: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct MrtBgp4mpStateChangeAs4 {
+    pub peer_as: u32,
+    pub local_as: u32,
+    pub interface_idx: u16,
+    pub addr_family: u16,
+    pub peer_ip: IpAddr,
+    pub local_ip: IpAddr,
+    pub old_state: u16,
+    pub new_state: u16
 }
 
 #[derive(Debug)]
@@ -352,6 +378,18 @@ impl From<(u16, u16)> for MrtSubType {
 
 // named!(peer_type<(&[u8], usize), (u8, u8, u8)>, tuple!(take_bits!(6), take_bits!(1), take_bits!(1)) );
 
+fn parse_bgp_message(i: &[u8]) -> IResult<&[u8], Vec<u8>> {
+    do_parse!(i,
+              _marker: take!(16) >>
+              len: be_u16 >>
+              _msg_type: be_u8 >>
+              msg: take!(len - 19) >>
+              (
+                  msg.to_vec()
+              )
+        )
+}
+
 fn parse_as_path_limit(i: &[u8]) -> IResult<&[u8], BGPAttrAsPathLimit> {
     do_parse!(i,
               len: be_u8 >>
@@ -619,11 +657,131 @@ fn parse_message(major: u16, subtype: u16, input: &[u8]) -> IResult<&[u8], MrtMe
                           rib_entries: entries
                       }))
             )                      
-        }
-        (16, 4) => { // BGP4MP , BGP4MP_MESSAGE_AS4
-            dbg!(input);
+        },
+        (16, 0) => { // BGP4MP , BGP4MP_STATE_CHANGE
             unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
-        }
+        },
+        (16, 1) => { // BGP4MP , BGP4MP_MESSAGE
+            unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        },
+        (16, 4) => { // BGP4MP , BGP4MP_MESSAGE_AS4
+            //dbg!(input);
+            do_parse!(input,
+                      peer_as: be_u32 >>
+                      local_as: be_u32 >>
+                      interface_idx: be_u16 >>
+                      addr_family: be_u16 >>
+                      ip_len: value!( match addr_family { 1 => 4, 2 => 16, _ => unimplemented!("Unknown BGP4MP_MESSAGE_AS4 addr_family: {}", addr_family)}) >>
+                      peer_ip_raw: take!(ip_len) >>
+                      local_ip_raw: take!(ip_len) >>
+                      peer_ip: value!({
+                          match addr_family {
+                              1 => {
+                                  let mut addr = vec![0u8; 4];
+                                  addr.copy_from_slice(&peer_ip_raw);
+                                  IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))))
+                              },
+                              2 => {
+                                  let mut addr = vec![0u8; 16];
+                                  addr.copy_from_slice(&peer_ip_raw);
+                                  IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )))
+                              },
+                              _ => { unimplemented!("Unknown BGP4MP_MESSAGE_AS4 peer_ip with addr_family {} and prefix_raw: {:?}",
+                                                    addr_family, peer_ip_raw )}
+                          }
+                      }) >>
+                      local_ip: value!({
+                          match addr_family {
+                              1 => {
+                                  let mut addr = vec![0u8; 4];
+                                  addr.copy_from_slice(&local_ip_raw);
+                                  IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))))
+                              },
+                              2 => {
+                                  let mut addr = vec![0u8; 16];
+                                  addr.copy_from_slice(&local_ip_raw);
+                                  IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )))
+                              },
+                              _ => { unimplemented!("Unknown BGP4MP_MESSAGE_AS4 local_ip with addr_family {} and prefix_raw: {:?}",
+                                                    addr_family, local_ip_raw )}
+                          }
+                      }) >>
+                      bgp_message: parse_bgp_message >>
+                      (MrtMessage::Bgp4mpMessageAs4(MrtBgp4mpMessageAs4{
+                          peer_as: peer_as,
+                          local_as: local_as,
+                          interface_idx: interface_idx,
+                          addr_family: addr_family,
+                          peer_ip: peer_ip,
+                          local_ip: local_ip,
+                          bgp_message: bgp_message
+                      }))
+            )
+            // unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        },
+        (16, 5) => { // BGP4MP , BGP4MP_MESSAGE_AS4
+            dbg!(input);
+            do_parse!(input,
+                      peer_as: be_u32 >>
+                      local_as: be_u32 >>
+                      interface_idx: be_u16 >>
+                      addr_family: be_u16 >>
+                      ip_len: value!( match addr_family { 1 => 4, 2 => 16, _ => unimplemented!("Unknown BGP4MP_MESSAGE_AS4 addr_family: {}", addr_family)}) >>
+                      peer_ip_raw: take!(ip_len) >>
+                      local_ip_raw: take!(ip_len) >>
+                      peer_ip: value!({
+                          match addr_family {
+                              1 => {
+                                  let mut addr = vec![0u8; 4];
+                                  addr.copy_from_slice(&peer_ip_raw);
+                                  IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))))
+                              },
+                              2 => {
+                                  let mut addr = vec![0u8; 16];
+                                  addr.copy_from_slice(&peer_ip_raw);
+                                  IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )))
+                              },
+                              _ => { unimplemented!("Unknown BGP4MP_MESSAGE_AS4 peer_ip with addr_family {} and prefix_raw: {:?}",
+                                                    addr_family, peer_ip_raw )}
+                          }
+                      }) >>
+                      local_ip: value!({
+                          match addr_family {
+                              1 => {
+                                  let mut addr = vec![0u8; 4];
+                                  addr.copy_from_slice(&local_ip_raw);
+                                  IpAddr::V4(Ipv4Addr::from(u32::from_be_bytes(addr.try_into().expect("incorrect ipv4 length"))))
+                              },
+                              2 => {
+                                  let mut addr = vec![0u8; 16];
+                                  addr.copy_from_slice(&local_ip_raw);
+                                  IpAddr::V6(Ipv6Addr::from(u128::from_be_bytes(addr.try_into().expect("incorrect ipv6 length") )))
+                              },
+                              _ => { unimplemented!("Unknown BGP4MP_MESSAGE_AS4 local_ip with addr_family {} and prefix_raw: {:?}",
+                                                    addr_family, local_ip_raw )}
+                          }
+                      }) >>
+                      old_state: be_u16 >>
+                      new_state: be_u16 >>
+                      (MrtMessage::Bgp4mpStateChangeAs4(MrtBgp4mpStateChangeAs4{
+                          peer_as: peer_as,
+                          local_as: local_as,
+                          interface_idx: interface_idx,
+                          addr_family: addr_family,
+                          peer_ip: peer_ip,
+                          local_ip: local_ip,
+                          old_state: old_state,
+                          new_state: new_state
+                      }))
+            )
+                //unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        },
+        (16, 6) => { // BGP4MP , BGP4MP_MESSAGE_LOCAL
+            unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        },
+        (16, 7) => { // BGP4MP , BGP4MP_MESSAGE_AS4_LOCAL
+            unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
+        },
         _ => {
             dbg!(input);
             unimplemented!("Major {} subtype {} Data: {:?}", major, subtype, input)
