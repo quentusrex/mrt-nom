@@ -15,6 +15,8 @@ Parser and tooling for working with MRT files in Rust: https://datatracker.ietf.
   * Library first, service application next
 * Low level library interface for protocol parsing
 * High level long running service for network and business level event handling
+* Life is messy. When something unexpected happens, make it easy to triage
+  * If something unexpected happens, try to make it easy to post as an issue with enough relavent info
 
 ## Development Progress
 

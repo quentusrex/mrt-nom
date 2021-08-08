@@ -6,9 +6,10 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::fs::File;
 use std::io::Read;
 use flate2::bufread::GzDecoder;
-use nom::{IResult, take_bits};
+use nom::{IResult};
+//use nom::combinator::rest;
 use nom::number::complete::{be_u8, be_u16, be_u32};
-use nom::bytes::complete::take;
+//use nom::bytes::complete::take;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -89,12 +90,12 @@ pub enum BGPAttr {
     Aggregator(BGPAttrAggregator), // 7
     Community(BGPAttrCommunity), // 8
     MultiprotocolReachableNLRI(BGPAttrMPReachableNLRI), // 14
-    MultiprotocolUnreachableNLRI, // 15
-    ExtendedCommunities, // 16
-    ConnectorAttribute, // 20 deprecated
-    AsPathLimit, // 21 deprecated
+    MultiprotocolUnreachableNLRI(BGPAttrMPUnreachableNLRI), // 15
+    ExtendedCommunity(BGPAttrExtendedCommunity), // 16
+    ConnectorAttribute(BGPAttrConnector), // 20 deprecated
+    AsPathLimit(BGPAttrAsPathLimit), // 21 deprecated
     LargeCommunity(BGPAttrLargeCommunity), // 32
-    ReservedDevelopment // 255
+    ReservedDevelopment(BGPAttrReservedDevelopment) // 255
 }
 
 #[derive(Debug)]
@@ -104,11 +105,25 @@ pub struct BGPAttrLargeCommunity {
     pub part_two: u32
 }
 
+// TODO: Break out all community handling into a top level Enum, with substructures. 
+#[derive(Debug)]
+pub enum ExtendedCommunity {
+    TwoOctetAS,
+    IPv4AddrSpecific,
+    Opaque,
+}
+
 #[derive(Debug)]
 pub struct BGPAttrExtendedCommunity {
     pub high: u8,
     pub low: u8,
     pub value: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct BGPAttrAsPathLimit {
+    pub len: u8,
+    pub asn: u32,
 }
 
 #[derive(Debug)]
@@ -125,11 +140,22 @@ pub struct BGPAttrAggregator {
 }
 
 #[derive(Debug)]
+pub struct BGPAttrReservedDevelopment {
+    pub value: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct BGPAttrConnector {
+    pub value: Vec<u8>
+}
+
+
+#[derive(Debug)]
 pub struct BGPAttrAsPath {
 //    pub optional: bool,   // bit 0
 //    pub transitive: bool, // bit 1
 //    pub partial: bool,    // bit 2
-//    pub extended_length: bool, // bit 3
+//    pub xtended_length: bool, // bit 3
     pub as_path: Vec<u32>
 }
 
@@ -173,6 +199,19 @@ impl From<&[u8]> for BGPAttrMPReachableNLRI {
     }
 }
 
+#[derive(Debug)]
+pub struct BGPAttrMPUnreachableNLRI {
+    pub afi: u16,
+    pub safi: u8,
+    pub withdrawn_routes: Vec<u8>
+}
+
+impl From<&[u8]> for BGPAttrMPUnreachableNLRI {
+    fn from(input: &[u8]) -> Self {
+        parse_mp_unreachable_nlri(input).unwrap().1
+    }
+}
+
 impl From<u8> for BGPAttrOrigin {
     fn from(input: u8) -> Self {
         match input {
@@ -188,6 +227,12 @@ impl From<u8> for BGPAttrOrigin {
 
 
 
+impl From<&[u8]> for BGPAttrAsPathLimit {
+    fn from(input: &[u8]) -> Self {
+        parse_as_path_limit(input).unwrap().1
+    }
+}
+
 impl From<&[u8]> for BGPAttrLargeCommunity {
     fn from(input: &[u8]) -> Self {
         parse_large_communities(input).unwrap().1
@@ -197,6 +242,18 @@ impl From<&[u8]> for BGPAttrLargeCommunity {
 impl From<&[u8]> for BGPAttrExtendedCommunity {
     fn from(input: &[u8]) -> Self {
         parse_extended_communities(input).unwrap().1
+    }
+}
+
+impl From<&[u8]> for BGPAttrReservedDevelopment {
+    fn from(input: &[u8]) -> Self {
+        BGPAttrReservedDevelopment{ value: input.to_vec() }
+    }
+}
+
+impl From<&[u8]> for BGPAttrConnector {
+    fn from(input: &[u8]) -> Self {
+        BGPAttrConnector{ value: input.to_vec() }
     }
 }
 
@@ -215,11 +272,12 @@ impl From<&[u8]> for BGPAttrAggregator {
 impl From<(u8, bool, bool, bool, &[u8])> for BGPAttr {
     fn from(input: (u8, bool, bool, bool, &[u8])) -> Self {
         let (i, o, t, p, d) = input;
+        // https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml
         match i {
             1 => BGPAttr::Origin(d[0].into()),            
             2 => {
                 let (_, resp) = parse_extended_as_path(d).unwrap();
-                let (segment_type, segment_len, asns) = resp;
+                let (_segment_type, _segment_len, asns) = resp;
                 BGPAttr::AsPath(BGPAttrAsPath{
                     as_path: asns
                 })
@@ -242,15 +300,16 @@ impl From<(u8, bool, bool, bool, &[u8])> for BGPAttr {
             7 => BGPAttr::Aggregator(d.into()),
             8 => BGPAttr::Community(d.into()),
             14 => BGPAttr::MultiprotocolReachableNLRI(d.into()),
-            16 => BGPAttr::ExtendedCommunities(d.into()),
+            15 => BGPAttr::MultiprotocolUnreachableNLRI(d.into()),
+            16 => BGPAttr::ExtendedCommunity(d.into()), 
+            20 => BGPAttr::ConnectorAttribute(d.into()),
+            21 => BGPAttr::AsPathLimit(d.into()),
             32 => BGPAttr::LargeCommunity(d.into()),
+            255 => BGPAttr::ReservedDevelopment(d.into()),
             /* 
-            15 => BGPAttr::MultiprotocolUnreachableNLRI,
-            20 => BGPAttr::ConnectorAttribute,
-            21 => BGPAttr::AsPathLimit,
-            255 => BGPAttr::ReservedDevelopment,
              */
             _ => {
+                
                 unimplemented!("Unknown BGPAttrType: {} optional: {} transitive: {} partial: {} data: {:?}", i, o, t, p, d);
             }
         }
@@ -293,6 +352,17 @@ impl From<(u16, u16)> for MrtSubType {
 
 // named!(peer_type<(&[u8], usize), (u8, u8, u8)>, tuple!(take_bits!(6), take_bits!(1), take_bits!(1)) );
 
+fn parse_as_path_limit(i: &[u8]) -> IResult<&[u8], BGPAttrAsPathLimit> {
+    do_parse!(i,
+              len: be_u8 >>
+              asn: be_u32 >> 
+              ( BGPAttrAsPathLimit{
+                  len: len,
+                  asn: asn
+              })
+        )
+}
+
 fn parse_large_communities(i: &[u8]) -> IResult<&[u8], BGPAttrLargeCommunity> {
     do_parse!(i,
               admin: be_u32 >>
@@ -302,6 +372,19 @@ fn parse_large_communities(i: &[u8]) -> IResult<&[u8], BGPAttrLargeCommunity> {
                   global_admin: admin,
                   part_one: one,
                   part_two: two
+              })
+        )
+}
+
+fn parse_extended_communities(i: &[u8]) -> IResult<&[u8], BGPAttrExtendedCommunity> {
+    do_parse!(i,
+              high: be_u8 >>
+              low: be_u8 >>
+              value: take!(6) >>
+              ( BGPAttrExtendedCommunity{
+                  high: high,
+                  low: low,
+                  value: value.to_vec()
               })
         )
 }
@@ -333,7 +416,6 @@ fn parse_bgp_attributes(i: &[u8]) -> IResult<&[u8], Vec<BGPAttr>> {
 }
 
 fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
-    //dbg!(i);
     do_parse!(i,
               flags: be_u8 >>
               code: be_u8 >>
@@ -356,8 +438,25 @@ fn parse_bgp_attribute(i: &[u8]) -> IResult<&[u8], BGPAttr> {
     )
 }
 
+fn parse_mp_unreachable_nlri(input: &[u8]) -> IResult<&[u8], BGPAttrMPUnreachableNLRI> {
+    //dbg!(input);
+    do_parse!(input,
+              address_family_id: be_u16 >>
+              subsequent_address_family_id: be_u8 >>
+              nlri_len_bits: be_u8 >>
+              nlri: take!((nlri_len_bits + 7) / 8) >>
+              ({
+                  BGPAttrMPUnreachableNLRI{
+                      afi: address_family_id,
+                      safi: subsequent_address_family_id,
+                      withdrawn_routes: nlri.to_vec()
+                  }
+              })
+    )
+}
+
 fn parse_mp_reachable_nlri(input: &[u8]) -> IResult<&[u8], BGPAttrMPReachableNLRI> {
-    dbg!(input);
+    //dbg!(input);
     do_parse!(input,
               address_family_id: be_u16 >>
               subsequent_address_family_id: be_u8 >>
